@@ -6,6 +6,19 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      talos_version:
+        description: >-
+          Talos release to build an installer for, e.g. v1.12.11.
+          Leave blank to build every supported release.
+        required: false
+        type: string
+      extension_version:
+        description: >-
+          Extension version to bake in. Must already be published to GHCR
+          (a tag build publishes it). Defaults to the tag when run on a tag.
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -68,15 +81,39 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  # Decides which Talos releases to build installers for. A matrix cannot be
+  # driven from a workflow input directly, so it is computed here and consumed
+  # via fromJSON below.
+  plan:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      talos: ${{ steps.matrix.outputs.talos }}
+    steps:
+      - name: Choose Talos releases
+        id: matrix
+        run: |
+          # The supported Talos releases. Add one here and every future tag
+          # build publishes an installer for it.
+          default='["v1.10.5", "v1.12.11"]'
+
+          requested='${{ inputs.talos_version }}'
+          if [ -n "$requested" ]; then
+            printf 'talos=["%s"]\n' "$requested" >> "$GITHUB_OUTPUT"
+          else
+            printf 'talos=%s\n' "$default" >> "$GITHUB_OUTPUT"
+          fi
+
   # Publishes a Talos installer image with the extension baked in.
   #
-  # Tag-gated on purpose: an installer is a large artifact and is only useful at
-  # a release boundary, so building one per commit would burn GHCR storage for
-  # nothing. An installer is also specific to ONE Talos release and is not
-  # forward-compatible, hence the matrix -- add versions as you adopt them.
+  # Runs on tag pushes, and on demand via workflow_dispatch so that a new Talos
+  # release can be covered without cutting a new extension release. Building one
+  # per commit would burn GHCR storage for nothing.
+  #
+  # An installer is specific to ONE Talos release and is not forward-compatible,
+  # hence the matrix.
   installer:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [plan, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -84,8 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        talos:
-          - v1.10.5
+        talos: ${{ fromJSON(needs.plan.outputs.talos) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -96,13 +132,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve extension version
+        id: ext
+        run: |
+          set -eu
+          version='${{ inputs.extension_version }}'
+          if [ -z "$version" ]; then
+            case "${GITHUB_REF}" in
+              refs/tags/v*) version="${GITHUB_REF_NAME#v}" ;;
+              *)
+                echo "::error::extension_version is required when not running on a tag"
+                exit 1
+                ;;
+            esac
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building installer for Talos ${{ matrix.talos }} with extension $version"
+
       - name: Build and push installer
         env:
           # imager authenticates ghcr.io from this, so the extension package
           # does not need to be public for the pull to succeed.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
           make push-installer \
-            VERSION="$version" \
+            VERSION="${{ steps.ext.outputs.version }}" \
             TALOS_VERSION="${{ matrix.talos }}"

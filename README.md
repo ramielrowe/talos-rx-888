@@ -67,8 +67,20 @@ It is **not** forward-compatible: a new Talos release needs a new installer.
 
 **Use a published one.** Tagged releases publish
 `ghcr.io/<you>/talos-rx-888-installer:<talos>-<ext>`, e.g.
-`:v1.10.5-0.1.0`. Extend the `talos` matrix in
-`.github/workflows/build.yml` to cover more Talos releases.
+`:v1.10.5-0.1.0`, for every Talos release in the `default` list in the `plan`
+job of `.github/workflows/build.yml` (currently v1.10.5 and v1.12.11).
+
+**Or cut one on demand.** To cover a new Talos release without tagging a new
+extension version, run the `build` workflow manually — Actions → build → Run
+workflow — with:
+
+| input | example | meaning |
+|---|---|---|
+| `talos_version` | `v1.12.11` | build only this release; blank builds them all |
+| `extension_version` | `0.1.0` | the already-published extension to bake in |
+
+The extension version must already exist in the registry: the installer build
+resolves it to a digest before imager runs, rather than rebuilding it.
 
 **Or build and publish your own:**
 
@@ -87,15 +99,25 @@ anything older. For a local build with no push, use
 names it `installer-<arch>.tar`; it does not include the platform, despite what
 the `--platform` flag suggests.)
 
-**On private packages.** GHCR packages are private by default, and a package
-first published by CI's `GITHUB_TOKEN` is not world-readable. This is handled
-automatically in CI and in the Makefile: imager's keychain is
-`MultiKeychain(DefaultKeychain, github.Keychain, google.Keychain)`, and
-`github.Keychain` authenticates ghcr.io from `$GITHUB_TOKEN`, which the
-`installer-remote` target forwards into the container. Building locally against
-a private package therefore needs either `export GITHUB_TOKEN=<a PAT with
-read:packages>` or a `~/.docker/config.json` from `docker login ghcr.io` — both
-of which the Makefile picks up. Otherwise make the package public.
+**Package visibility is separate from repository visibility.** Making the repo
+public does *not* publish its GHCR packages: a package first pushed by CI's
+`GITHUB_TOKEN` is created private regardless. Flip both
+`talos-rx-888` and `talos-rx-888-installer` to public under the repository's
+Packages settings after the first publish.
+
+This matters far more for the installer than for the extension:
+
+- **The extension** can stay private. imager's keychain is
+  `MultiKeychain(DefaultKeychain, github.Keychain, google.Keychain)`, and
+  `github.Keychain` authenticates ghcr.io from `$GITHUB_TOKEN`, which the
+  `installer-remote` target forwards into the container. CI works
+  unattended; locally, `export GITHUB_TOKEN=<PAT with read:packages>` or
+  `docker login ghcr.io` (the Makefile picks up either).
+- **The installer cannot**, in practice. A Talos node pulls
+  `machine.install.image` *itself*, during install and upgrade, with no
+  GitHub credentials anywhere. A private installer package means configuring
+  `machine.registries` with a pull secret on every node, before it can ever
+  reach the image. Publish this one.
 
 Then upgrade the node, or point `machine.install.image` at it for a new one:
 

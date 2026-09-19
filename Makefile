@@ -25,12 +25,18 @@ BASE_INSTALLER ?= ghcr.io/siderolabs/installer-base:$(TALOS_VERSION)
 .PHONY: all image firmware loader staging service-rootfs validate push \
         installer installer-remote push-installer test-local watch-local clean help
 
-# crane, run via docker so there is nothing to install. The docker config is
-# mounted when it exists, which is what authenticates the push. Override with
+# crane, run via docker so there is nothing to install. Override with
 # CRANE=crane CRANE_OUT=_out to use a local binary instead.
-DOCKER_CFG := $(HOME)/.docker/config.json
-CRANE ?= docker run --rm \
-	$(if $(wildcard $(DOCKER_CFG)),-v $(DOCKER_CFG):/root/.docker/config.json:ro,) \
+#
+# --user 0 and DOCKER_CONFIG are both load-bearing. The crane image runs as uid
+# 65532 with no HOME set, so it never looks in /root/.docker, and a docker
+# config written by `docker login` is mode 0600 owned by someone else -- so
+# mounting the file alone yields "No matching credentials were found".
+# Mounting the directory, naming it with DOCKER_CONFIG, and running as root
+# fixes the path and the permissions together.
+DOCKER_CFG_DIR := $(HOME)/.docker
+CRANE ?= docker run --rm --user 0 \
+	$(if $(wildcard $(DOCKER_CFG_DIR)/config.json),-v $(DOCKER_CFG_DIR):/dockercfg:ro -e DOCKER_CONFIG=/dockercfg,) \
 	-v $(PWD)/_out:/out \
 	gcr.io/go-containerregistry/crane:latest
 CRANE_OUT ?= /out

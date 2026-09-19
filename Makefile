@@ -2,7 +2,7 @@
 
 REGISTRY      ?= ghcr.io
 IMAGE_NAME    ?= ramielrowe/talos-rx-888
-VERSION       ?= 0.1.0
+VERSION       ?= 0.2.0
 IMAGE_REPO    := $(REGISTRY)/$(IMAGE_NAME)
 IMAGE         := $(IMAGE_REPO):$(VERSION)
 

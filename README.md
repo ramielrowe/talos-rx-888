@@ -48,8 +48,8 @@ It does **not** run any streaming or DSP software: that stays in your pods.
 ### 1. Build and push the extension
 
 ```sh
-make image VERSION=0.1.0
-make push  VERSION=0.1.0
+make image VERSION=0.2.0
+make push  VERSION=0.2.0
 ```
 
 The hosted Image Factory (`factory.talos.dev`) cannot be used: its schematic only
@@ -69,7 +69,7 @@ It is **not** forward-compatible: a new Talos release needs a new installer.
 
 **Use a published one.** Tagged releases publish
 `ghcr.io/<you>/talos-rx-888-installer:<talos>-<ext>`, e.g.
-`:v1.10.5-0.1.0`, for every Talos release in the `default` list in the `plan`
+`:v1.10.5-0.2.0`, for every Talos release in the `default` list in the `plan`
 job of `.github/workflows/build.yml` (currently v1.10.5 and v1.12.11).
 
 **Or cut one on demand.** To cover a new Talos release without tagging a new
@@ -79,7 +79,7 @@ workflow — with:
 | input | example | meaning |
 |---|---|---|
 | `talos_version` | `v1.12.11` | build only this release; blank builds them all |
-| `extension_version` | `0.1.0` | the already-published extension to bake in |
+| `extension_version` | `0.2.0` | the already-published extension to bake in |
 
 The extension version must already exist in the registry: the installer build
 resolves it to a digest before imager runs, rather than rebuilding it.
@@ -87,7 +87,7 @@ resolves it to a digest before imager runs, rather than rebuilding it.
 **Or build and publish your own:**
 
 ```sh
-make push-installer VERSION=0.1.0 TALOS_VERSION=v1.10.5
+make push-installer VERSION=0.2.0 TALOS_VERSION=v1.10.5
 ```
 
 That resolves the extension to a digest — so the installer records exactly which
@@ -124,7 +124,7 @@ This matters far more for the installer than for the extension:
 Then upgrade the node, or point `machine.install.image` at it for a new one:
 
 ```sh
-talosctl upgrade -n <node> --image ghcr.io/<you>/talos-rx-888-installer:v1.10.5-0.1.0
+talosctl upgrade -n <node> --image ghcr.io/<you>/talos-rx-888-installer:v1.10.5-0.2.0
 ```
 
 ### 3. usbfs buffer limit — already handled
@@ -285,8 +285,8 @@ The extension version lives in three places, and only two of them are checked:
 tag. Bump the first two, then tag:
 
 ```sh
-make check-version VERSION=0.2.0    # fails until the manifest is bumped
-git tag -a v0.2.0 -m "..." && git push origin v0.2.0
+make check-version VERSION=0.3.0    # fails until the manifest is bumped
+git tag -a v0.3.0 -m "..." && git push origin v0.3.0
 ```
 
 CI runs the same check on every build — against the Makefile default always,

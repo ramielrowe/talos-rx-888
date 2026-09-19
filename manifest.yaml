@@ -1,7 +1,7 @@
 version: v1alpha1
 metadata:
   name: rx888
-  version: "0.1.0"
+  version: "0.2.0"
   author: Andrew Melton
   description: |
     Firmware bootstrap for the RX-888 and RX-888 MK2 direct-sampling SDRs.

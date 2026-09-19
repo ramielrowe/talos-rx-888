@@ -3,14 +3,41 @@
 REGISTRY      ?= ghcr.io
 IMAGE_NAME    ?= ramielrowe/talos-rx-888
 VERSION       ?= 0.1.0
-IMAGE         := $(REGISTRY)/$(IMAGE_NAME):$(VERSION)
+IMAGE_REPO    := $(REGISTRY)/$(IMAGE_NAME)
+IMAGE         := $(IMAGE_REPO):$(VERSION)
+
+# The installer bakes in BOTH a Talos release and this extension, so the tag
+# names both. An installer is not forward-compatible with other Talos releases.
+INSTALLER_REPO ?= $(IMAGE_REPO)-installer
+# Deferred (=, not :=) on purpose: TALOS_VERSION is defined below this line.
+INSTALLER_IMAGE = $(INSTALLER_REPO):$(TALOS_VERSION)-$(VERSION)
 
 # Talos release whose imager builds the installer. Keep in step with the
 # compatibility range declared in manifest.yaml.
 TALOS_VERSION ?= v1.10.5
 ARCH          ?= amd64
 
-.PHONY: all image firmware loader staging service-rootfs validate push installer test-local watch-local clean help
+# imager has no default for this and fails with `parsing reference ""` if it is
+# omitted. Renamed from siderolabs/installer to siderolabs/installer-base as of
+# Talos 1.10; override if you target something older.
+BASE_INSTALLER ?= ghcr.io/siderolabs/installer-base:$(TALOS_VERSION)
+
+.PHONY: all image firmware loader staging service-rootfs validate push \
+        installer installer-remote push-installer test-local watch-local clean help
+
+# crane, run via docker so there is nothing to install. The docker config is
+# mounted when it exists, which is what authenticates the push. Override with
+# CRANE=crane CRANE_OUT=_out to use a local binary instead.
+DOCKER_CFG := $(HOME)/.docker/config.json
+CRANE ?= docker run --rm \
+	$(if $(wildcard $(DOCKER_CFG)),-v $(DOCKER_CFG):/root/.docker/config.json:ro,) \
+	-v $(PWD)/_out:/out \
+	gcr.io/go-containerregistry/crane:latest
+CRANE_OUT ?= /out
+
+# Extra flags for imager, e.g. IMAGER_ARGS='--extra-kernel-arg console=ttyS0'
+# or --insecure when pulling the extension from a plain-HTTP registry.
+IMAGER_ARGS ?=
 
 all: image ## Build the extension image (default)
 
@@ -38,15 +65,39 @@ push: image ## Push the extension image to the registry
 # Depends on `push`: imager pulls the extension over the network with crane, it
 # never reads the local docker daemon, so an image that has only been built
 # locally is invisible to it.
-installer: push ## Build a Talos installer image with the extension baked in
+installer: push ## Build a Talos installer locally (publishes the extension first)
+	@$(MAKE) --no-print-directory installer-remote
+
+# Builds the installer from an already-published extension. This is what CI
+# uses, where an earlier job has already pushed it.
+#
+# The extension is resolved to a digest first, so the installer records exactly
+# which build went into it and a moving tag cannot change that later.
+#
+# GITHUB_TOKEN is forwarded when set: imager's keychain is
+# MultiKeychain(DefaultKeychain, github.Keychain, google.Keychain), and
+# github.Keychain authenticates ghcr.io from that variable -- which is how a
+# PRIVATE extension package can be pulled without making it public.
+installer-remote: ## Build a Talos installer from the published extension
 	mkdir -p _out
-	docker run --rm -t -v $(PWD)/_out:/out \
+	@set -eu; \
+	digest=$$($(CRANE) digest $(IMAGE)); \
+	echo "extension $(IMAGE) -> $$digest"; \
+	docker run --rm -v $(PWD)/_out:/out \
+		$(if $(GITHUB_TOKEN),-e GITHUB_TOKEN,) \
 		ghcr.io/siderolabs/imager:$(TALOS_VERSION) installer \
 		--platform=metal --arch $(ARCH) \
-		--system-extension-image $(IMAGE)
+		--base-installer-image $(BASE_INSTALLER) \
+		$(IMAGER_ARGS) \
+		--system-extension-image $(IMAGE_REPO)@$$digest
 	@echo
 	@echo "Installer written to _out/installer-$(ARCH).tar"
-	@echo "Push it with: crane push _out/installer-$(ARCH).tar $(REGISTRY)/$(IMAGE_NAME)-installer:$(TALOS_VERSION)"
+
+push-installer: installer-remote ## Push the installer image to the registry
+	$(CRANE) push $(CRANE_OUT)/installer-$(ARCH).tar $(INSTALLER_IMAGE)
+	@echo
+	@echo "Published $(INSTALLER_IMAGE)"
+	@echo "Use it with: talosctl upgrade -n <node> --image $(INSTALLER_IMAGE)"
 
 # Runs the real service rootfs against whatever RX-888 is attached to this
 # machine: same binary, same default firmware path as on a Talos node.

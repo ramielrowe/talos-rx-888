@@ -52,33 +52,55 @@ make push  VERSION=0.1.0
 
 The hosted Image Factory (`factory.talos.dev`) cannot be used: its schematic only
 has `customization.systemExtensions.officialExtensions`, with no field for a
-custom image. Build an installer with `imager` instead. (A self-hosted
+custom image. You need an installer built by `imager`. (A self-hosted
 image-factory can be pointed at your own extensions source, which is a larger
 undertaking than this.)
 
-`make installer` below depends on `push` for a reason: imager pulls the
-extension over the network with crane and never reads your local docker daemon,
-so an image that exists only locally is invisible to it.
+Note `make installer` depends on `push`. imager pulls the extension over the
+network with crane and never reads your local docker daemon, so an image that
+exists only locally is invisible to it.
 
-**GHCR packages are private by default.** A package first published by CI's
-`GITHUB_TOKEN` is not world-readable, and imager runs with no registry
-credentials, so the pull will 401. Set the package to public in the GHCR UI, or
-mount your docker config into the imager container.
+### 2. Get an installer image
 
-### 2. Build an installer with the extension baked in
+The installer bakes a specific Talos release together with this extension.
+It is **not** forward-compatible: a new Talos release needs a new installer.
+
+**Use a published one.** Tagged releases publish
+`ghcr.io/<you>/talos-rx-888-installer:<talos>-<ext>`, e.g.
+`:v1.10.5-0.1.0`. Extend the `talos` matrix in
+`.github/workflows/build.yml` to cover more Talos releases.
+
+**Or build and publish your own:**
 
 ```sh
-make installer VERSION=0.1.0 TALOS_VERSION=v1.10.5
-crane push _out/installer-amd64.tar ghcr.io/<you>/talos-rx-888-installer:v1.10.5
+make push-installer VERSION=0.1.0 TALOS_VERSION=v1.10.5
 ```
 
-(imager names the artifact `installer-<arch>.tar` — it does not include the
-platform, despite what the `--platform` flag suggests.)
+That resolves the extension to a digest — so the installer records exactly which
+build went into it, and re-tagging cannot change it afterwards — runs imager, and
+pushes the result. It also passes `--base-installer-image`, which imager has no
+default for: omit it and the build fails at the last step with
+`parsing reference ""`. The image was renamed `siderolabs/installer` →
+`siderolabs/installer-base` in Talos 1.10; override `BASE_INSTALLER` for
+anything older. For a local build with no push, use
+`make installer` and find the artifact at `_out/installer-amd64.tar`. (imager
+names it `installer-<arch>.tar`; it does not include the platform, despite what
+the `--platform` flag suggests.)
+
+**On private packages.** GHCR packages are private by default, and a package
+first published by CI's `GITHUB_TOKEN` is not world-readable. This is handled
+automatically in CI and in the Makefile: imager's keychain is
+`MultiKeychain(DefaultKeychain, github.Keychain, google.Keychain)`, and
+`github.Keychain` authenticates ghcr.io from `$GITHUB_TOKEN`, which the
+`installer-remote` target forwards into the container. Building locally against
+a private package therefore needs either `export GITHUB_TOKEN=<a PAT with
+read:packages>` or a `~/.docker/config.json` from `docker login ghcr.io` — both
+of which the Makefile picks up. Otherwise make the package public.
 
 Then upgrade the node, or point `machine.install.image` at it for a new one:
 
 ```sh
-talosctl upgrade -n <node> --image ghcr.io/<you>/talos-rx-888-installer:v1.10.5
+talosctl upgrade -n <node> --image ghcr.io/<you>/talos-rx-888-installer:v1.10.5-0.1.0
 ```
 
 ### 3. Raise the usbfs buffer limit

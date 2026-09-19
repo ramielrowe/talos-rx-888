@@ -67,3 +67,42 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # Publishes a Talos installer image with the extension baked in.
+  #
+  # Tag-gated on purpose: an installer is a large artifact and is only useful at
+  # a release boundary, so building one per commit would burn GHCR storage for
+  # nothing. An installer is also specific to ONE Talos release and is not
+  # forward-compatible, hence the matrix -- add versions as you adopt them.
+  installer:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        talos:
+          - v1.10.5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push installer
+        env:
+          # imager authenticates ghcr.io from this, so the extension package
+          # does not need to be public for the pull to succeed.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          make push-installer \
+            VERSION="$version" \
+            TALOS_VERSION="${{ matrix.talos }}"

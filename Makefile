@@ -23,7 +23,8 @@ ARCH          ?= amd64
 BASE_INSTALLER ?= ghcr.io/siderolabs/installer-base:$(TALOS_VERSION)
 
 .PHONY: all image firmware loader staging service-rootfs validate push \
-        installer installer-remote push-installer test-local watch-local clean help
+        check-version installer installer-remote push-installer test-local \
+        watch-local clean help
 
 # crane, run via docker so there is nothing to install. Override with
 # CRANE=crane CRANE_OUT=_out to use a local binary instead.
@@ -61,6 +62,9 @@ staging: ## Build the staging stage (extension tree plus a shell, for testing)
 
 service-rootfs: ## Build the extension service's container rootfs on its own
 	docker build --target service-rootfs -t talos-rx-888-service .
+
+check-version: ## Verify manifest.yaml metadata.version matches VERSION
+	python3 hack/check-version.py $(VERSION)
 
 validate: image ## Check the built image against Talos's extension contract
 	python3 hack/validate-extension.py $(IMAGE)

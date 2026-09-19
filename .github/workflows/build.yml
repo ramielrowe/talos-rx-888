@@ -35,6 +35,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Before the firmware build, which takes minutes. The manifest version is
+      # what a node reports in `talosctl get extensions` and is a separate
+      # string from both the tag and the Makefile default, so nothing else
+      # catches a release cut without bumping it.
+      - name: Check manifest version
+        run: |
+          set -eu
+          make check-version
+          case "${GITHUB_REF}" in
+            refs/tags/v*) make check-version VERSION="${GITHUB_REF_NAME#v}" ;;
+          esac
+
       - uses: docker/setup-buildx-action@v3
 
       # Only amd64: the extension carries a static x86-64 binary, and imager

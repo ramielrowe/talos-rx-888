@@ -249,6 +249,23 @@ make test-local    # load firmware into an RX-888 attached to THIS machine
 uevent socket, which is network-namespace scoped. (That is also why the service
 works on Talos: extension services run in the host network namespace.)
 
+## Cutting a release
+
+The extension version lives in three places, and only two of them are checked:
+`metadata.version` in `manifest.yaml` (what a node reports in
+`talosctl get extensions`), the `VERSION` default in the `Makefile`, and the git
+tag. Bump the first two, then tag:
+
+```sh
+make check-version VERSION=0.2.0    # fails until the manifest is bumped
+git tag -a v0.2.0 -m "..." && git push origin v0.2.0
+```
+
+CI runs the same check on every build — against the Makefile default always,
+and against the tag on a tag push — before the firmware build, so a release cut
+without bumping the manifest fails in seconds rather than shipping an extension
+that reports the previous version forever.
+
 ## Licensing
 
 The built image is **not** under a single licence: the packaging is MIT, the

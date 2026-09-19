@@ -1,0 +1,61 @@
+# Smoke test: proves a pod can get the RX-888 and open it without being root.
+#
+# Deliberately runs as an unprivileged, non-root user. If this pod can read the
+# usbfs node, the extension's udev rule took effect; without it the node would
+# be 0600 root:root inside the container and this would fail with EACCES.
+#
+#   kubectl apply -f examples/test-pod.yaml
+#   kubectl logs rx888-smoke-test
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rx888-smoke-test
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: alpine:3.20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        limits:
+          # Resource name is <domain>/<device name>; the domain defaults to
+          # devic.es unless generic-device-plugin was started with --domain.
+          devic.es/rx888: "1"
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          echo "running as: $(id)"
+
+          # The plugin injects exactly one node, at its host path. It sets no
+          # environment variables, so discovery means looking for it.
+          node=$(find /dev/bus/usb -type c | head -n 1)
+          if [ -z "$node" ]; then
+            echo "FAIL: no USB device node was injected"
+            exit 1
+          fi
+          echo "device node: $node"
+          ls -l "$node"
+
+          # libusb opens usbfs nodes O_RDWR, so read access alone is not enough.
+          [ -r "$node" ] || { echo "FAIL: node is not readable"; exit 1; }
+          [ -w "$node" ] || { echo "FAIL: node is not writable"; exit 1; }
+
+          # Reading a usbfs node returns the USB device descriptor. Bytes 8-9
+          # are idVendor and 10-11 idProduct, little-endian: expect b4 04 f1 00.
+          echo "device descriptor:"
+          od -An -tx1 -N 12 "$node"
+
+          if od -An -tx1 -j 8 -N 4 "$node" | tr -d ' ' | grep -q '^b404f100$'; then
+            echo "PASS: 04b4:00f1 present and openable as non-root"
+          else
+            echo "FAIL: descriptor is not an RX-888 running firmware"
+            exit 1
+          fi

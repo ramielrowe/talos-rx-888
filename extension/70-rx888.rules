@@ -1,0 +1,11 @@
+# RX-888 / RX-888 MK2 usbfs node permissions.
+#
+# 00f3 is the bare FX3 ROM bootloader, 00f1 is the device once SDDC firmware is
+# running. Both are opened directly via libusb, so the raw usbfs node needs to
+# be readable and writable by whoever is driving the radio.
+#
+# MODE only, deliberately: Talos runs systemd-udevd with --resolve-names=never,
+# so a GROUP="..." name would silently never resolve. Use a numeric GID here if
+# you want something tighter than 0666.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="00f3", MODE:="0666"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="00f1", MODE:="0666"

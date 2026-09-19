@@ -1,0 +1,16 @@
+version: v1alpha1
+metadata:
+  name: rx888
+  version: 0.1.0
+  author: Andrew Melton
+  description: |
+    Firmware bootstrap for the RX-888 and RX-888 MK2 direct-sampling SDRs.
+
+    The RX-888 has no boot flash for its Cypress FX3: at every power-up it
+    enumerates as the bare FX3 ROM bootloader (04b4:00f3) and the host must
+    download firmware into its RAM before the device is usable. This extension
+    runs a service that loads that firmware at boot and on hotplug, and ships a
+    udev rule so an unprivileged pod can open the resulting device node.
+  compatibility:
+    talos:
+      version: ">= v1.10.0"

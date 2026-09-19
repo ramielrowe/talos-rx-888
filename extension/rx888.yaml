@@ -1,0 +1,26 @@
+name: rx888
+container:
+  entrypoint: /usr/bin/rx888-init
+  # The firmware path is deliberately left at its built-in default rather than
+  # passed as an argument: an ExtensionServiceConfig can add environment
+  # entries to this service but cannot rewrite its args, so $RX888_FIRMWARE is
+  # the only override an operator has. See docs/LICENSING.md.
+  args:
+    - --min-usbfs-mb
+    - "256"
+  mounts:
+    # The device cgroup already permits every device, but the container
+    # otherwise sees only containerd's default /dev, so the real device nodes
+    # have to be bind-mounted in. rshared so nodes created by later hotplug
+    # events propagate into the service.
+    - source: /dev
+      destination: /dev
+      type: bind
+      options:
+        - rshared
+        - rbind
+        - rw
+depends:
+  # udevd owns the device nodes we look at and the rule that sets their mode.
+  - service: udevd
+restart: always

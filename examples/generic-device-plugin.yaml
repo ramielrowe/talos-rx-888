@@ -1,0 +1,71 @@
+# generic-device-plugin, configured to advertise the RX-888 to pods.
+#
+# It matches 04b4:00f1 ONLY — the device with firmware already running. It must
+# never be pointed at 04b4:00f3 (the bare FX3 bootloader): the plugin derives a
+# device's identity from its /dev/bus/usb/BBB/DDD path, so a device that is
+# handed to a pod and then loads firmware re-enumerates to a new path, leaving
+# the pod holding a dead char-device node. The extension's job is to make sure
+# the device is already at 00f1 before it ever appears here.
+#
+# Deployed into kube-system because Talos enforces the "baseline" Pod Security
+# standard cluster-wide and exempts only kube-system. Anywhere else you must
+# label the namespace pod-security.kubernetes.io/enforce=privileged.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: generic-device-plugin
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: generic-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: generic-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: generic-device-plugin
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+          effect: NoExecute
+        - operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: generic-device-plugin
+          image: squat/generic-device-plugin:0.2.0
+          args:
+            - --device
+            - |
+              name: rx888
+              groups:
+                - usb:
+                    - vendor: "04b4"
+                      product: "00f1"
+                  count: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 10Mi
+            limits:
+              cpu: 50m
+              memory: 20Mi
+          ports:
+            - containerPort: 8080
+              name: http
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        # The only mount that matters: the kubelet's device-plugin socket
+        # directory. The plugin discovers USB devices by reading /sys, which
+        # the CRI already mounts into every container, and device nodes are
+        # injected by containerd on the host rather than by the plugin.
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins

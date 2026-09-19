@@ -46,12 +46,16 @@ RUN make all && ls -l SDDC_FX3.img
 FROM alpine:3.20 AS loader-build
 
 ARG LIBUSB_VERSION=1.0.27
+# This code is statically linked into a binary that runs privileged on every
+# node, and GitHub release assets are mutable by the repo owner, so pin it.
+ARG LIBUSB_SHA256=ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575
 
 RUN apk add --no-cache build-base curl linux-headers
 
 WORKDIR /build
 RUN curl -fsSL -o libusb.tar.bz2 \
         "https://github.com/libusb/libusb/releases/download/v${LIBUSB_VERSION}/libusb-${LIBUSB_VERSION}.tar.bz2" \
+    && echo "${LIBUSB_SHA256}  libusb.tar.bz2" | sha256sum -c - \
     && tar xjf libusb.tar.bz2 \
     && cd "libusb-${LIBUSB_VERSION}" \
     && ./configure \
@@ -63,23 +67,32 @@ RUN curl -fsSL -o libusb.tar.bz2 \
     && make install
 
 COPY src/ /build/src/
-RUN gcc -std=gnu11 -O2 -Wall -Wextra -Werror -static \
+# Deliberately NOT stripped: this is the one binary that cannot be debugged on a
+# Talos node (no shell, no debugger), and a stripped static binary that faults
+# yields nothing but a bare address in the kernel log. The symbols cost ~100 KB.
+RUN gcc -std=gnu11 -O2 -Wall -Wextra -Werror \
+        -Wformat=2 -Wshadow -Wvla -Wpointer-arith \
+        -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+        -static \
         -I/build/src \
         -I/opt/libusb/include/libusb-1.0 \
         -o /build/rx888-init \
         /build/src/rx888-init.c \
         /build/src/ezusb.c \
         /opt/libusb/lib/libusb-1.0.a \
-    && strip /build/rx888-init \
     && ! ldd /build/rx888-init 2>/dev/null | grep -q '=>' \
     && /build/rx888-init --help
 
 # ---------------------------------------------------------------------------
 # Stage 3: assemble and normalise the extension tree.
 #
-# Talos rejects an extension containing world-writable files, and the rootfs is
-# overlaid onto the host, so ownership and modes are pinned explicitly here
+# The rootfs is overlaid onto the host, so ownership and modes are pinned here
 # rather than inherited from whatever the build context happened to have.
+#
+# Note imager does NOT enforce the world-writable or allowed-path rules: the
+# checks exist behind Builder.ExtensionValidateContents, which nothing in the
+# Talos tree ever sets. They are enforced by Image Factory and by the
+# extensions-validator in siderolabs/extensions CI -- and by `make validate`.
 # ---------------------------------------------------------------------------
 FROM alpine:3.20 AS staging
 
@@ -110,8 +123,9 @@ ENTRYPOINT ["/usr/bin/rx888-init"]
 # ---------------------------------------------------------------------------
 # Stage 5: the extension image.
 #
-# The image root must contain exactly manifest.yaml and rootfs/ — Talos rejects
-# anything else outright. Every rootfs path here is inside Talos's allowlist
+# The image root must contain exactly manifest.yaml and rootfs/. This one IS
+# enforced unconditionally: extensions.Load() fails with `unexpected file %q`
+# for anything else. Every rootfs path here is inside Talos's allowlist
 # (/usr/local/** and /usr/lib/udev/rules.d).
 #
 # Kept last so that a plain `docker build .` builds the extension itself.

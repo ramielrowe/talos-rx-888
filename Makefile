@@ -35,15 +35,18 @@ validate: image ## Check the built image against Talos's extension contract
 push: image ## Push the extension image to the registry
 	docker push $(IMAGE)
 
-installer: ## Build a Talos installer image with the extension baked in
+# Depends on `push`: imager pulls the extension over the network with crane, it
+# never reads the local docker daemon, so an image that has only been built
+# locally is invisible to it.
+installer: push ## Build a Talos installer image with the extension baked in
 	mkdir -p _out
 	docker run --rm -t -v $(PWD)/_out:/out \
 		ghcr.io/siderolabs/imager:$(TALOS_VERSION) installer \
 		--platform=metal --arch $(ARCH) \
 		--system-extension-image $(IMAGE)
 	@echo
-	@echo "Installer written to _out/metal-$(ARCH)-installer.tar"
-	@echo "Push it with: crane push _out/metal-$(ARCH)-installer.tar $(REGISTRY)/$(IMAGE_NAME)-installer:$(TALOS_VERSION)"
+	@echo "Installer written to _out/installer-$(ARCH).tar"
+	@echo "Push it with: crane push _out/installer-$(ARCH).tar $(REGISTRY)/$(IMAGE_NAME)-installer:$(TALOS_VERSION)"
 
 # Runs the real service rootfs against whatever RX-888 is attached to this
 # machine: same binary, same default firmware path as on a Talos node.
@@ -52,7 +55,7 @@ installer: ## Build a Talos installer image with the extension baked in
 # which is network-namespace scoped -- which is also why this works as a Talos
 # extension service, since those run in the host network namespace.
 RUN_SERVICE = docker run --rm --privileged --net=host \
-	-v /dev/bus/usb:/dev/bus/usb talos-rx-888-service
+	-v /dev/bus/usb:/dev/bus/usb talos-rx-888-service --min-usbfs-mb 256
 
 test-local: service-rootfs ## Load firmware into an RX-888 attached to this machine
 	$(RUN_SERVICE) --once

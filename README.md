@@ -12,9 +12,10 @@ then does it re-enumerate as `04b4:00f1`, normally at SuperSpeed.
 
 On an ordinary distribution that is a udev rule plus a systemd unit. On Talos it
 is not: there is no package manager, no systemd units, the rootfs is immutable,
-and **udev cannot run a firmware loader** — there is no shell or loader binary in
-the host rootfs, and SELinux only permits `udev_t` to execute `udev_exec_t` and
-`modprobe_exec_t`. A system extension is the supported way in.
+and **udev cannot run a firmware loader** — the host rootfs has no shell and no
+loader binary, and an extension can only place executables under `/usr/local`,
+which nothing in udev's path references. A system extension is the supported way
+in.
 
 Loading firmware on the host, rather than from the consuming pod, is also what
 makes the device plugin work at all. See
@@ -49,16 +50,30 @@ make image VERSION=0.1.0
 make push  VERSION=0.1.0
 ```
 
-Image Factory cannot be used: it only serves official Sidero extensions, and its
-schematic has no field for a custom image. Build an installer with `imager`
-instead.
+The hosted Image Factory (`factory.talos.dev`) cannot be used: its schematic only
+has `customization.systemExtensions.officialExtensions`, with no field for a
+custom image. Build an installer with `imager` instead. (A self-hosted
+image-factory can be pointed at your own extensions source, which is a larger
+undertaking than this.)
+
+`make installer` below depends on `push` for a reason: imager pulls the
+extension over the network with crane and never reads your local docker daemon,
+so an image that exists only locally is invisible to it.
+
+**GHCR packages are private by default.** A package first published by CI's
+`GITHUB_TOKEN` is not world-readable, and imager runs with no registry
+credentials, so the pull will 401. Set the package to public in the GHCR UI, or
+mount your docker config into the imager container.
 
 ### 2. Build an installer with the extension baked in
 
 ```sh
 make installer VERSION=0.1.0 TALOS_VERSION=v1.10.5
-crane push _out/metal-amd64-installer.tar ghcr.io/<you>/talos-rx-888-installer:v1.10.5
+crane push _out/installer-amd64.tar ghcr.io/<you>/talos-rx-888-installer:v1.10.5
 ```
+
+(imager names the artifact `installer-<arch>.tar` — it does not include the
+platform, despite what the `--platform` flag suggests.)
 
 Then upgrade the node, or point `machine.install.image` at it for a new one:
 
@@ -119,6 +134,14 @@ resources:
     devic.es/rx888: "1"
 ```
 
+**One radio per node**, as configured. generic-device-plugin collects every
+device matching a group into a *single* advertised resource, so with two radios
+attached the node still advertises `devic.es/rx888: 1` and the one pod that gets
+it receives both device nodes. `count: 2` does not help — it creates two units
+that each contain both radios. To schedule two radios independently, give each
+its own group keyed on `serial:` (the SDDC firmware reports one). `rx888-init`
+itself loads firmware into every attached radio regardless.
+
 ## Why the firmware must be loaded before the pod
 
 generic-device-plugin derives a device's identity from a SHA-1 of its
@@ -153,6 +176,15 @@ any pod that was holding the old device node needs recreating.
   `50-udev-default.rules`, which would otherwise set `0664`. `rx888-init` also
   re-asserts `0666` on each pass as a fallback, because a plain chmod races udev
   and loses.
+  - A consequence of `:=`: if you later try to tighten the mode with
+    `machine.udev.rules`, it will be **silently ignored**. Talos writes those to
+    `99-talos.rules`, which sorts after ours, and `:=` forbids later changes.
+    Change `extension/70-rx888.rules` and rebuild instead.
+  - Extension squashfs layers are built with `mksquashfs -all-root` and carry no
+    SELinux labels. This is fine today because Talos boots SELinux **permissive**
+    unless you pass `enforcing=1`. If you run enforcing, verify the rule is still
+    being applied — `talosctl logs ext-rx888` will report relaxing the node mode
+    on every arrival if udev has stopped doing it.
 - **One consumer at a time.** The RX-888 has a single bulk interface; a second
   process gets `LIBUSB_ERROR_BUSY`.
 - **No usbmon.** Talos kernels are built without `CONFIG_USB_MON`, so on-node USB

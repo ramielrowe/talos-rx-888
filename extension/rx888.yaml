@@ -8,19 +8,35 @@ container:
   args:
     - --min-usbfs-mb
     - "256"
+  # NOTE: Talos decodes this file WITHOUT KnownFields, so a misspelt or
+  # mis-nested key here is silently ignored -- no error, no log line, the
+  # setting simply never takes effect. Check changes carefully.
   mounts:
     # The device cgroup already permits every device, but the container
-    # otherwise sees only containerd's default /dev, so the real device nodes
-    # have to be bind-mounted in. rshared so nodes created by later hotplug
-    # events propagate into the service.
+    # otherwise sees only containerd's default tmpfs /dev, so the real device
+    # nodes have to be bind-mounted in. This mount is appended after the
+    # default, so it shadows it.
+    #
+    # rbind, not rshared: /dev is a single devtmpfs superblock, so nodes created
+    # by later hotplug events are visible through the bind automatically -- they
+    # are new inodes, not new mounts, and mount propagation has nothing to do
+    # with it. rshared would only push mounts we create back out to the host.
     - source: /dev
       destination: /dev
       type: bind
       options:
-        - rshared
         - rbind
         - rw
+# /sys is not listed above because containerd's default spec already mounts it
+# read-only, which is all we need: rx888-init reads
+# /sys/module/usbcore/parameters/usbfs_memory_mb, and libusb (built
+# --disable-udev) enumerates via /sys/bus/usb/devices. Neither needs it
+# writeable, so there is deliberately no security.writeableSysfs here.
 depends:
   # udevd owns the device nodes we look at and the rule that sets their mode.
+  # Talos waits for a dependency to be running AND healthy, and udevd's health
+  # check only passes after `udevadm trigger --action=add` plus `udevadm settle`
+  # -- so by the time this service starts, coldplug is done and 70-rx888.rules
+  # has already been applied.
   - service: udevd
 restart: always

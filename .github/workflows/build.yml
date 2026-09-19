@@ -10,6 +10,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # GHCR requires a lowercase path; github.repository preserves owner/repo case.
+  CI_IMAGE: ghcr.io/ci-local/talos-rx-888:ci
 
 jobs:
   build:
@@ -31,10 +33,10 @@ jobs:
           target: extension
           platforms: linux/amd64
           load: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci
+          tags: ${{ env.CI_IMAGE }}
 
       - name: Validate extension layout
-        run: python3 hack/validate-extension.py ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci
+        run: python3 hack/validate-extension.py ${{ env.CI_IMAGE }}
 
       - name: Log in to registry
         if: github.event_name != 'pull_request'

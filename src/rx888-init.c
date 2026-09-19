@@ -47,6 +47,9 @@
 /* How long a --once run waits for a freshly programmed device to come back. */
 #define REENUMERATE_TIMEOUT_MS 15000
 
+/* Quiet window after a successful load, while the FX3 resets and drops off. */
+#define REENUMERATE_GRACE_SEC 5
+
 #define FIRMWARE_ENV "RX888_FIRMWARE"
 
 static const char *opt_firmware = "/usr/share/rx888/SDDC_FX3.img";
@@ -82,6 +85,14 @@ static void log_msg(const char *level, const char *fmt, va_list ap)
 	fprintf(stderr, "%s %-5s rx888-init: ", ts, level);
 	vfprintf(stderr, fmt, ap);
 	fputc('\n', stderr);
+
+	/*
+	 * Without this a single transient write error latches stdio's error flag and
+	 * every later line is silently dropped -- the worst possible failure mode on
+	 * a node whose only diagnostic is `talosctl logs`.
+	 */
+	if (ferror(stderr))
+		clearerr(stderr);
 }
 
 static void log_info(const char *fmt, ...)
@@ -111,24 +122,37 @@ static void log_err(const char *fmt, ...)
 	va_end(ap);
 }
 
-/* ezusb.c declares this extern and calls it for its own diagnostics. It appends
- * its own newlines, so strip a trailing one to keep our log one-line-per-event. */
+/*
+ * ezusb.c declares this extern and calls it for its own diagnostics. It appends
+ * its own newlines, so strip a trailing one to keep our log one-line-per-event.
+ *
+ * Logged at warn level: with `verbose` left at 0 (see main()), ezusb only calls
+ * this for things that actually went wrong, and those must not be buried among
+ * our own info lines on a node where there is no shell to dig with.
+ */
 void logerror(const char *format, ...)
 {
 	char buf[512];
 	size_t len;
+	int n;
 	va_list ap;
 
+	buf[0] = '\0';
+
 	va_start(ap, format);
-	vsnprintf(buf, sizeof(buf), format, ap);
+	n = vsnprintf(buf, sizeof(buf), format, ap);
 	va_end(ap);
 
-	len = strlen(buf);
+	/* On an output error vsnprintf guarantees nothing about buf, not even a NUL. */
+	if (n < 0)
+		return;
+
+	len = strnlen(buf, sizeof(buf));
 	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
 		buf[--len] = '\0';
 
 	if (len > 0)
-		log_info("ezusb: %s", buf);
+		log_warn("ezusb: %s", buf);
 }
 
 /* ------------------------------------------------------------- usbfs warning */
@@ -202,20 +226,48 @@ static void relax_permissions(uint8_t bus, uint8_t addr, bool *logged)
 {
 	char path[64];
 	struct stat st;
+	int fd;
 
 	usb_node_path(path, sizeof(path), bus, addr);
 
-	if (stat(path, &st) != 0) {
-		log_warn("cannot stat %s: %s", path, strerror(errno));
+	/*
+	 * Operate on a file descriptor, not the path. A device can be unplugged
+	 * between a stat() and a chmod(), and Linux reuses device numbers -- so the
+	 * path-based form can end up making an unrelated device that landed on the
+	 * same bus/address world-writable. O_NOFOLLOW plus the S_ISCHR check makes
+	 * sure we only ever touch a real USB character device.
+	 */
+	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0) {
+		/* ENOENT just means the device left between the scan and now. */
+		if (errno != ENOENT)
+			log_warn("cannot open %s: %s", path, strerror(errno));
 		return;
 	}
-	if ((st.st_mode & 0666) == 0666)
-		return;
 
-	if (chmod(path, 0666) != 0) {
-		log_warn("cannot chmod %s to 0666: %s", path, strerror(errno));
+	if (fstat(fd, &st) != 0) {
+		log_warn("cannot stat %s: %s", path, strerror(errno));
+		close(fd);
 		return;
 	}
+
+	if (!S_ISCHR(st.st_mode)) {
+		log_warn("%s is not a character device, refusing to change its mode", path);
+		close(fd);
+		return;
+	}
+
+	if ((st.st_mode & 0666) == 0666) {
+		close(fd);
+		return;
+	}
+
+	if (fchmod(fd, 0666) != 0) {
+		log_warn("cannot chmod %s to 0666: %s", path, strerror(errno));
+		close(fd);
+		return;
+	}
+	close(fd);
 
 	if (logged == NULL || !*logged) {
 		log_info("relaxed %s from mode %04o to 0666", path, st.st_mode & 07777);
@@ -245,6 +297,9 @@ struct backoff_entry {
 };
 
 static struct backoff_entry backoff[MAX_TRACKED];
+
+/* Global throttle used when the per-device table is exhausted. */
+static time_t backoff_floor;
 
 static uint16_t dev_key(uint8_t bus, uint8_t addr)
 {
@@ -276,17 +331,29 @@ static bool backoff_ready(uint16_t key, time_t now)
 {
 	struct backoff_entry *e = backoff_find(key, false);
 
+	if (now < backoff_floor)
+		return false;
+
 	return e == NULL || now >= e->next_attempt;
 }
 
-static void backoff_record_failure(uint16_t key, time_t now)
+static void backoff_record_failure(uint16_t key, uint8_t bus, uint8_t addr, time_t now)
 {
 	struct backoff_entry *e = backoff_find(key, true);
 	long delay = BACKOFF_MIN_SEC;
 	unsigned i;
 
-	if (e == NULL)
+	if (e == NULL) {
+		/*
+		 * Table full. Never fail silently here: without an entry
+		 * backoff_ready() returns true forever, which would turn a failing
+		 * device into an unthrottled retry loop.
+		 */
+		log_warn("backoff table full, throttling bus %u device %u by %d s",
+			 bus, addr, BACKOFF_MAX_SEC);
+		backoff_floor = now + BACKOFF_MAX_SEC;
 		return;
+	}
 
 	e->failures++;
 	for (i = 1; i < e->failures && delay < BACKOFF_MAX_SEC; i++)
@@ -295,15 +362,51 @@ static void backoff_record_failure(uint16_t key, time_t now)
 		delay = BACKOFF_MAX_SEC;
 
 	e->next_attempt = now + delay;
-	log_warn("retrying that device in %lds (attempt %u failed)", delay, e->failures);
+	log_warn("retrying bus %u device %u in %ld s (attempt %u failed)",
+		 bus, addr, delay, e->failures);
 }
 
-static void backoff_clear(uint16_t key)
+/*
+ * Drop entries for devices that are no longer on the bus. Without this the table
+ * fills permanently -- every replug of a failing radio takes a fresh USB address
+ * and therefore a fresh key -- and backoff stops working altogether.
+ */
+static void backoff_forget_absent(const uint16_t *present, size_t n_present)
 {
-	struct backoff_entry *e = backoff_find(key, false);
+	size_t i, j;
 
-	if (e != NULL)
-		e->key = 0;
+	for (i = 0; i < MAX_TRACKED; i++) {
+		bool still_here = false;
+
+		if (backoff[i].key == 0)
+			continue;
+		for (j = 0; j < n_present; j++) {
+			if (present[j] == backoff[i].key) {
+				still_here = true;
+				break;
+			}
+		}
+		if (!still_here)
+			backoff[i].key = 0;
+	}
+}
+
+/*
+ * Called after a successful hand-off. Deliberately does NOT free the slot: the
+ * FX3 takes a moment to reset and disconnect, and until it does it still
+ * enumerates as the bootloader. Freeing the slot here would let the very next
+ * scan push a second image into a device that is midway through booting.
+ * The slot is reclaimed by backoff_forget_absent() once the device goes away.
+ */
+static void backoff_note_success(uint16_t key, time_t now)
+{
+	struct backoff_entry *e = backoff_find(key, true);
+
+	if (e == NULL)
+		return;
+
+	e->failures = 0;
+	e->next_attempt = now + REENUMERATE_GRACE_SEC;
 }
 
 /* --------------------------------------------------------------- app tracking */
@@ -312,6 +415,7 @@ static void backoff_clear(uint16_t key)
  * rather than on every poll. */
 static uint16_t app_seen[MAX_TRACKED];
 static bool app_relax_logged[MAX_TRACKED];
+static bool app_table_full_logged;
 
 /*
  * Find (or claim) the slot tracking a device running firmware. Returns its index
@@ -377,6 +481,47 @@ static void app_forget_absent(const uint16_t *present, size_t n_present)
 /* ------------------------------------------------------------ firmware upload */
 
 /*
+ * ezusb_load_ram() does NOT return libusb error codes. For FX_TYPE_FX3 it tail
+ * calls fx3_load_ram(), which has its own small-negative convention. The values
+ * collide with libusb's enum but mean entirely different things -- ezusb's -4 is
+ * an allocation failure, while LIBUSB_ERROR_NO_DEVICE is also -4 -- so these must
+ * never be passed to libusb_error_name().
+ */
+static const char *ezusb_strerror(int status)
+{
+	switch (status) {
+	case  0: return "success";
+	case -2: return "cannot open firmware image";
+	case -3: return "malformed firmware image (short read, bad signature, or unsupported image type)";
+	case -4: return "out of memory reading firmware image";
+	case -5: return "USB control transfer failed while writing image";
+	case -6: return "image verification or entry-point jump failed";
+	case -7: return "firmware image checksum mismatch";
+	case -8: return "could not read FX3 bootloader version";
+	default: return "unknown error";
+	}
+}
+
+/*
+ * After a successful jump the FX3 leaves the bus immediately, so the surest
+ * evidence that a load worked is that the bootloader device has gone away.
+ * ezusb cannot distinguish that from a genuine failure: ezusb_fx3_jump()
+ * tolerates LIBUSB_ERROR_IO but not LIBUSB_ERROR_NO_DEVICE, and reports the
+ * latter as -6, the same code it uses for a verification mismatch.
+ */
+static bool device_departed(libusb_device *dev)
+{
+	libusb_device_handle *probe = NULL;
+	int status = libusb_open(dev, &probe);
+
+	if (status == LIBUSB_SUCCESS) {
+		libusb_close(probe);
+		return false;
+	}
+	return status == LIBUSB_ERROR_NO_DEVICE || status == LIBUSB_ERROR_NOT_FOUND;
+}
+
+/*
  * Returns true if firmware was handed to the device. The device then detaches
  * and re-enumerates as RX888_PID_APP, which the next scan picks up.
  */
@@ -402,9 +547,9 @@ static bool load_firmware(libusb_device *dev, uint8_t bus, uint8_t addr)
 	 * right after another process exited can spuriously fail with EBUSY. One
 	 * retry covers it.
 	 */
-	for (attempt = 0; attempt < 2; attempt++) {
+	for (attempt = 0; ; attempt++) {
 		status = libusb_claim_interface(handle, 0);
-		if (status != LIBUSB_ERROR_BUSY)
+		if (status != LIBUSB_ERROR_BUSY || attempt >= 1)
 			break;
 		log_warn("interface busy on bus %u device %u, retrying", bus, addr);
 		usleep(500000);
@@ -418,21 +563,25 @@ static bool load_firmware(libusb_device *dev, uint8_t bus, uint8_t addr)
 
 	status = ezusb_load_ram(handle, opt_firmware, FX_TYPE_FX3, IMG_TYPE_IMG, 0);
 
-	/*
-	 * The final step of the FX3 RAM load is a jump to the entry point, during
-	 * which the device disconnects mid-transfer. An I/O error there is the
-	 * expected outcome, not a failure.
-	 */
-	if (status != 0 && status != LIBUSB_ERROR_IO && status != LIBUSB_ERROR_NO_DEVICE) {
-		log_err("firmware load on bus %u device %u failed: %s",
-			bus, addr, libusb_error_name(status));
-		libusb_release_interface(handle, 0);
-		libusb_close(handle);
-		return false;
-	}
-
 	libusb_release_interface(handle, 0);
 	libusb_close(handle);
+
+	if (status != 0) {
+		/*
+		 * The device disconnecting as it jumps to the new firmware can surface
+		 * as a late error, so check whether it actually left the bus before
+		 * believing the error.
+		 */
+		if (device_departed(dev)) {
+			log_info("load on bus %u device %u reported \"%s\" but the device "
+				 "left the bus, treating as success",
+				 bus, addr, ezusb_strerror(status));
+		} else {
+			log_err("firmware load on bus %u device %u failed: %s (ezusb %d)",
+				bus, addr, ezusb_strerror(status), status);
+			return false;
+		}
+	}
 
 	log_info("firmware handed to bus %u device %u, waiting for it to re-enumerate as %04x:%04x",
 		 bus, addr, RX888_VID, RX888_PID_APP);
@@ -444,8 +593,10 @@ static bool load_firmware(libusb_device *dev, uint8_t bus, uint8_t addr)
 static unsigned scan_and_act(libusb_context *ctx)
 {
 	uint16_t present_apps[MAX_TRACKED];
+	uint16_t present_boot[MAX_TRACKED];
 	unsigned loaded = 0;
 	size_t n_present = 0;
+	size_t n_boot = 0;
 	libusb_device **list;
 	ssize_t count, i;
 	time_t now = time(NULL);
@@ -456,7 +607,7 @@ static unsigned scan_and_act(libusb_context *ctx)
 		return 0;
 	}
 
-	for (i = 0; i < count; i++) {
+	for (i = 0; i < count && !stop_requested; i++) {
 		struct libusb_device_descriptor desc;
 		libusb_device *dev = list[i];
 		uint8_t bus, addr;
@@ -479,7 +630,15 @@ static unsigned scan_and_act(libusb_context *ctx)
 				present_apps[n_present++] = key;
 
 			slot = app_slot(key, &is_new);
-			if (is_new) {
+			if (slot < 0) {
+				/* Table full: report once rather than re-announcing forever. */
+				if (!app_table_full_logged) {
+					log_warn("tracking table full at %d devices; "
+						 "further radios will be handled but not tracked",
+						 MAX_TRACKED);
+					app_table_full_logged = true;
+				}
+			} else if (is_new) {
 				int speed = libusb_get_device_speed(dev);
 
 				log_info("RX-888 running firmware at bus %u device %u, link %s",
@@ -496,25 +655,32 @@ static unsigned scan_and_act(libusb_context *ctx)
 		if (desc.idProduct != RX888_PID_BOOT)
 			continue;
 
+		if (n_boot < MAX_TRACKED)
+			present_boot[n_boot++] = key;
+
 		/*
 		 * Only ever act on a bootloader device. Re-flashing a device that is
 		 * already running firmware would need a RESETFX3 or USBDEVFS_RESET
 		 * first, and there is no reason to go there.
+		 *
+		 * No relax_permissions() here: we open this node ourselves as root, and
+		 * no pod ever wants a bootloader. Touching it would only add log noise
+		 * on every retry, and widen the window in which we chmod a node that a
+		 * departing device has just freed.
 		 */
 		if (!backoff_ready(key, now))
 			continue;
 
-		relax_permissions(bus, addr, NULL);
-
 		if (load_firmware(dev, bus, addr)) {
-			backoff_clear(key);
+			backoff_note_success(key, now);
 			loaded++;
 		} else {
-			backoff_record_failure(key, now);
+			backoff_record_failure(key, bus, addr, now);
 		}
 	}
 
 	app_forget_absent(present_apps, n_present);
+	backoff_forget_absent(present_boot, n_boot);
 	libusb_free_device_list(list, 1);
 	return loaded;
 }
@@ -548,6 +714,14 @@ static void install_signal_handlers(void)
 	sa.sa_handler = on_signal;
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
+
+	/*
+	 * Keep running if the log consumer goes away; a dropped log line must not
+	 * take the radio down with it.
+	 */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_IGN;
+	sigaction(SIGPIPE, &sa, NULL);
 }
 
 /* ------------------------------------------------------------------------ main */
@@ -568,6 +742,28 @@ static void usage(const char *argv0)
 		argv0, opt_firmware, opt_min_usbfs_mb, opt_poll_interval);
 }
 
+/* strtol with the error checking strtol itself does not do. */
+static bool parse_long(const char *text, const char *flag, long min, long max, long *out)
+{
+	char *end = NULL;
+	long value;
+
+	errno = 0;
+	value = strtol(text, &end, 10);
+
+	if (errno != 0 || end == text || *end != '\0') {
+		log_err("%s: %s is not a number", flag, text);
+		return false;
+	}
+	if (value < min || value > max) {
+		log_err("%s: %ld is out of range (%ld-%ld)", flag, value, min, max);
+		return false;
+	}
+
+	*out = value;
+	return true;
+}
+
 static bool parse_args(int argc, char **argv)
 {
 	int i;
@@ -575,20 +771,36 @@ static bool parse_args(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		const char *arg = argv[i];
 
-		if (strcmp(arg, "--firmware") == 0 && i + 1 < argc) {
+		bool needs_value = strcmp(arg, "--firmware") == 0 ||
+				   strcmp(arg, "--min-usbfs-mb") == 0 ||
+				   strcmp(arg, "--poll-interval") == 0;
+
+		if (needs_value && i + 1 >= argc) {
+			log_err("%s requires a value", arg);
+			return false;
+		}
+
+		if (strcmp(arg, "--firmware") == 0) {
 			opt_firmware = argv[++i];
-		} else if (strcmp(arg, "--min-usbfs-mb") == 0 && i + 1 < argc) {
-			opt_min_usbfs_mb = strtol(argv[++i], NULL, 10);
-		} else if (strcmp(arg, "--poll-interval") == 0 && i + 1 < argc) {
-			opt_poll_interval = strtol(argv[++i], NULL, 10);
-			if (opt_poll_interval < 1)
-				opt_poll_interval = 1;
+		} else if (strcmp(arg, "--min-usbfs-mb") == 0) {
+			if (!parse_long(argv[++i], arg, 0, 1024L * 1024L, &opt_min_usbfs_mb))
+				return false;
+		} else if (strcmp(arg, "--poll-interval") == 0) {
+			if (!parse_long(argv[++i], arg, 1, 3600, &opt_poll_interval))
+				return false;
 		} else if (strcmp(arg, "--once") == 0) {
 			opt_once = true;
 		} else if (strcmp(arg, "--verbose") == 0) {
-			verbose++;
+			/*
+			 * Clamped at both ends. ezusb tests `if (verbose)`, so a negative
+			 * value is truthy -- an unclamped --quiet --quiet would turn
+			 * logging back ON and re-arm the bootloader-version read below.
+			 */
+			if (verbose < 3)
+				verbose++;
 		} else if (strcmp(arg, "--quiet") == 0) {
-			verbose--;
+			if (verbose > 0)
+				verbose--;
 		} else if (strcmp(arg, "--help") == 0) {
 			usage(argv[0]);
 			exit(0);
@@ -615,6 +827,7 @@ int main(int argc, char **argv)
 	libusb_hotplug_callback_handle cb_handle;
 	libusb_context *ctx = NULL;
 	bool hotplug = false;
+	unsigned baseline_apps;
 	unsigned loaded;
 	time_t last_poll;
 	int status;
@@ -630,6 +843,14 @@ int main(int argc, char **argv)
 	 * so this is the only way an operator can point the service at a different
 	 * firmware image without rebuilding the extension.
 	 */
+	/*
+	 * ezusb.c initialises this to 1, which puts a purely cosmetic
+	 * "read bootloader version" control transfer on the critical path -- a
+	 * device that stalls it aborts the load before a single byte is written.
+	 * Default it off and let --verbose opt back in.
+	 */
+	verbose = 0;
+
 	env_firmware = getenv(FIRMWARE_ENV);
 	if (env_firmware != NULL && env_firmware[0] != '\0')
 		opt_firmware = env_firmware;
@@ -680,6 +901,14 @@ int main(int argc, char **argv)
 	}
 
 	last_poll = time(NULL);
+
+	/*
+	 * Devices already running firmware before we started. The --once wait below
+	 * has to count from here: waiting for "any" device would return instantly on
+	 * a host that already has one radio up, abandoning a second radio we just
+	 * programmed before its new node exists.
+	 */
+	baseline_apps = app_count();
 	loaded = scan_and_act(ctx);
 	rescan_requested = 0;
 
@@ -690,17 +919,21 @@ int main(int argc, char **argv)
 		 * real outcome, and so the new node gets its mode relaxed before we go.
 		 */
 		if (loaded > 0) {
+			unsigned want = baseline_apps + loaded;
 			int waited;
 
-			for (waited = 0; waited < REENUMERATE_TIMEOUT_MS; waited += 250) {
+			for (waited = 0; waited < REENUMERATE_TIMEOUT_MS && !stop_requested;
+			     waited += 250) {
 				usleep(250000);
 				scan_and_act(ctx);
-				if (app_count() > 0)
+				if (app_count() >= want)
 					break;
 			}
-			if (app_count() == 0)
-				log_warn("device did not re-enumerate as %04x:%04x within %d ms",
-					 RX888_VID, RX888_PID_APP, REENUMERATE_TIMEOUT_MS);
+			if (app_count() < want)
+				log_warn("only %u of %u expected devices re-enumerated as "
+					 "%04x:%04x within %d ms",
+					 app_count(), want, RX888_VID, RX888_PID_APP,
+					 REENUMERATE_TIMEOUT_MS);
 		}
 		log_info("--once given, exiting");
 		libusb_exit(ctx);

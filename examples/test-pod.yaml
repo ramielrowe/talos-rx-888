@@ -1,8 +1,10 @@
 # Smoke test: proves a pod can get the RX-888 and open it without being root.
 #
-# Deliberately runs as an unprivileged, non-root user. If this pod can read the
-# usbfs node, the extension's udev rule took effect; without it the node would
-# be 0600 root:root inside the container and this would fail with EACCES.
+# Deliberately runs as an unprivileged, non-root user. If this pod can open the
+# usbfs node read-write, the extension's udev rule took effect; without it
+# systemd's own 50-udev-default.rules leaves the node 0664 root:root, so the
+# write check below fails. (0600 is only the raw devtmpfs default, before udev
+# processes the device at all.)
 #
 #   kubectl apply -f examples/test-pod.yaml
 #   kubectl logs rx888-smoke-test

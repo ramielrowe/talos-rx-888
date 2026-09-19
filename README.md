@@ -156,10 +156,17 @@ That example sets `machine.sysfs`, which works on every Talos release this
 extension supports. On Talos >= 1.14 the same thing is expressed as a
 `SysfsConfig` document; both forms are in the file.
 
-Note this only works because we build the installer ourselves.
-`machine.install.extraKernelArgs` is deprecated, applies only at
-install/upgrade, and is silently ignored on UKI/systemd-boot — which is exactly
-what an imager-built installer produces.
+Note this only works because we build the installer ourselves. A machine config
+*cannot* be baked into an installer image — imager has no flag for it, and
+`--meta` carries key/value state rather than config. Machine config reaches a
+node from the platform at boot (`talos.config=`, a `metal-iso` config partition,
+or `talosctl apply-config`), which is a property of boot media, not of
+installers.
+
+The kernel argument is the supported way to do this, not a workaround: what is
+deprecated is the machine config field `machine.install.extraKernelArgs`, whose
+own deprecation notice says to use Image Factory or imager instead — and
+imager's `--extra-kernel-arg` is what the Makefile uses.
 
 ### 4. Check it came up
 

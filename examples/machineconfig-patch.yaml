@@ -1,14 +1,24 @@
-# Raise the usbfs buffer limit for RX-888 streaming.
+# Override the usbfs buffer limit at runtime.
+#
+# You usually do NOT need this. The published installer already bakes
+# usbcore.usbfs_memory_mb=1000 into the kernel command line, so a node boots
+# with a working value. Use this file to change that value on a node without
+# rebuilding, or on a node installed from some other installer.
 #
 # The kernel default is 16 MB. An RX-888 MK2 at 64.8 Msps x 16-bit is about
 # 130 MB/s, so 16 MB is roughly 120 ms of headroom and libusb_submit_transfer()
 # starts returning LIBUSB_ERROR_NO_MEM as soon as a consumer raises its queue
 # depth or sample rate. 1000 is the value the RX-888 community settles on.
 #
-# Talos applies this at runtime, with no reboot, and reapplies it on every
-# config change. Do NOT try to do this with a kernel argument:
-# machine.install.extraKernelArgs is deprecated, only takes effect at
-# install/upgrade, and is silently ignored on UKI/systemd-boot installs.
+# Talos applies this at runtime with no reboot, reapplies it on every config
+# change, and it takes precedence over the boot-time value.
+#
+# For the record on kernel arguments: the deprecated thing is the machine
+# config field machine.install.extraKernelArgs, which only takes effect at
+# install/upgrade and is silently ignored on UKI/systemd-boot. Its deprecation
+# notice points at imager as the replacement, and imager's --extra-kernel-arg
+# is exactly what the Makefile uses to bake the value in. That path is current,
+# not deprecated.
 #
 # Apply with:
 #   talosctl patch mc -n <node> -p @examples/machineconfig-patch.yaml

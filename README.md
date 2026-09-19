@@ -27,7 +27,9 @@ makes the device plugin work at all. See
   firmware at boot and on hotplug, for every RX-888 attached, idempotently.
 - Ships a udev rule so the usbfs node is `0666` and an unprivileged pod can open
   it, and relaxes the mode itself as a fallback.
-- Warns in its log if `usbcore.usbfs_memory_mb` is still too low for streaming.
+- Warns in its log if `usbcore.usbfs_memory_mb` is too low for streaming — though
+  the installer bakes a working value into the kernel command line, so this is a
+  backstop rather than a step you have to remember.
 
 It does **not** run any streaming or DSP software: that stays in your pods.
 
@@ -125,23 +127,39 @@ Then upgrade the node, or point `machine.install.image` at it for a new one:
 talosctl upgrade -n <node> --image ghcr.io/<you>/talos-rx-888-installer:v1.10.5-0.1.0
 ```
 
-### 3. Raise the usbfs buffer limit
+### 3. usbfs buffer limit — already handled
 
-**This step is required.** The kernel caps usbfs buffers at 16 MB, which is
-about 120 ms of headroom at 64.8 Msps; past that `libusb_submit_transfer()`
-returns `LIBUSB_ERROR_NO_MEM`.
+Nothing to do. The installer bakes `usbcore.usbfs_memory_mb=1000` into the
+kernel command line, so a node boots ready to stream.
+
+This matters because the kernel default is 16 MB, which is roughly 120 ms of
+headroom at 64.8 Msps; past that `libusb_submit_transfer()` returns
+`LIBUSB_ERROR_NO_MEM`. `rx888-init` logs a warning at startup if the value is
+ever below its threshold, so a node that somehow missed it says so in
+`talosctl logs ext-rx888`.
+
+Build with a different value, or none at all:
+
+```sh
+make push-installer USBFS_MEMORY_MB=2000    # or USBFS_MEMORY_MB= to omit it
+```
+
+To change it on a node you already installed, without rebuilding, patch the
+machine config — `/sys/module/usbcore/parameters/usbfs_memory_mb` is writable at
+runtime and takes precedence over the boot-time value:
 
 ```sh
 talosctl patch mc -n <node> -p @examples/machineconfig-patch.yaml
 ```
 
-That sets `machine.sysfs`, which Talos applies at runtime with no reboot and
-reapplies on every config change. On Talos ≥ 1.14 the same thing is expressed as
-a `SysfsConfig` document — both forms are in the example file.
+That example sets `machine.sysfs`, which works on every Talos release this
+extension supports. On Talos >= 1.14 the same thing is expressed as a
+`SysfsConfig` document; both forms are in the file.
 
-Do not try to do this with a kernel argument: `machine.install.extraKernelArgs`
-is deprecated, only applies at install/upgrade, and is silently ignored on
-UKI/systemd-boot installs.
+Note this only works because we build the installer ourselves.
+`machine.install.extraKernelArgs` is deprecated, applies only at
+install/upgrade, and is silently ignored on UKI/systemd-boot — which is exactly
+what an imager-built installer produces.
 
 ### 4. Check it came up
 
@@ -149,8 +167,11 @@ UKI/systemd-boot installs.
 talosctl get extensions                 # rx888 listed
 talosctl service ext-rx888              # Running
 talosctl logs ext-rx888                 # firmware loaded, bus/dev, link speed
-talosctl get kernelparamstatuses        # usbfs_memory_mb applied
+talosctl read /proc/cmdline             # usbcore.usbfs_memory_mb=1000 present
 ```
+
+(`talosctl get kernelparamstatuses` is the place to look instead if you set the
+value through machine config rather than taking the baked-in one.)
 
 A healthy log looks like:
 

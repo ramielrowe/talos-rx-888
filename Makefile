@@ -22,6 +22,12 @@ ARCH          ?= amd64
 # Talos 1.10; override if you target something older.
 BASE_INSTALLER ?= ghcr.io/siderolabs/installer-base:$(TALOS_VERSION)
 
+# Baked into the installer's kernel command line, so a node needs no machine
+# config to stream at full rate. The kernel default of 16 MB is about 120 ms of
+# headroom at 64.8 Msps. Set to empty to omit the argument entirely; it can
+# still be overridden at runtime via machine.sysfs / SysfsConfig.
+USBFS_MEMORY_MB ?= 1000
+
 .PHONY: all image firmware loader staging service-rootfs validate push \
         check-version installer installer-remote push-installer test-local \
         watch-local clean help
@@ -98,6 +104,7 @@ installer-remote: ## Build a Talos installer from the published extension
 		ghcr.io/siderolabs/imager:$(TALOS_VERSION) installer \
 		--platform=metal --arch $(ARCH) \
 		--base-installer-image $(BASE_INSTALLER) \
+		$(if $(USBFS_MEMORY_MB),--extra-kernel-arg usbcore.usbfs_memory_mb=$(USBFS_MEMORY_MB),) \
 		$(IMAGER_ARGS) \
 		--system-extension-image $(IMAGE_REPO)@$$digest
 	@echo
